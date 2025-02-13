@@ -1,23 +1,25 @@
 #include <stdio.h>
 #include <string.h>
+#include <errno.h>
 
 #include "fileops.h"
-#include "malloc.h"
-
-static struct stat st;
+#include "utils.h"
 
 bool FSOPFileExists(const char* file)
 {
+	struct stat st;
 	return !stat(file, &st) && !S_ISDIR(st.st_mode);
 }
 
 bool FSOPFolderExists(const char* path)
 {
+	struct stat st;
 	return !stat(path, &st) && S_ISDIR(st.st_mode);
 }
 
 size_t FSOPGetFileSizeBytes(const char* path)
 {
+	struct stat st;
 	if (stat(path, &st) < 0) return 0;
 
 	return st.st_size;
@@ -56,17 +58,20 @@ void FSOPMakeFolder(const char* path)
 s32 FSOPReadOpenFile(FILE* fp, void* buffer, u32 offset, u32 length)
 {
 	fseek(fp, offset, SEEK_SET);
-	return fread(buffer, length, 1, fp);
+	if (!fread(buffer, length, 1, fp))
+		return -errno ?: -1;
+
+	return 0;
 }
 
 s32 FSOPReadOpenFileA(FILE* fp, void** buffer, u32 offset, u32 length)
 {
 	*buffer = memalign32(length);
 	if (!*buffer)
-		return -1;
+		return -ENOMEM;
 
 	s32 ret = FSOPReadOpenFile(fp, *buffer, offset, length);
-	if (ret <= 0)
+	if (ret < 0)
 	{
 		free(*buffer);
 		*buffer = NULL;

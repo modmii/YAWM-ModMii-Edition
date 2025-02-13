@@ -9,8 +9,6 @@
 #include "sys.h"
 #include "title.h"
 #include "utils.h"
-#include "mini_seeprom.h"
-#include "otp.h"
 #include "video.h"
 #include "wad.h"
 #include "wpad.h"
@@ -93,76 +91,6 @@ static void DecEncTxtBuffer(char* buffer)
 		buffer[i] ^= key & 0xFF;
 		key = (key << 1) | (key >> 31);
 	}
-}
-
-u64 get_title_ios(u64 title) {
-	s32 ret, fd;
-	static char filepath[256] ATTRIBUTE_ALIGN(32);
-
-	// Check to see if title exists
-	if (ES_GetDataDir(title, filepath) >= 0 ) {
-		u32 tmd_size = 0;
-		static u8 tmd_buf[MAX_SIGNED_TMD_SIZE] ATTRIBUTE_ALIGN(32);
-
-		ret = ES_GetStoredTMDSize(title, &tmd_size);
-		if (ret < 0){
-			// If we fail to use the ES function, try reading manually
-			// This is a workaround added since some IOS (like 21) don't like our
-			// call to ES_GetStoredTMDSize
-
-			//printf("Error! ES_GetStoredTMDSize: %d\n", ret);
-
-			sprintf(filepath, "/title/%08x/%08x/content/title.tmd", TITLE_UPPER(title), TITLE_LOWER(title));
-
-			ret = ISFS_Open(filepath, ISFS_OPEN_READ);
-			if (ret <= 0)
-			{
-				//printf("Error! ISFS_Open (ret = %d)\n", ret);
-				return 0;
-			}
-
-			fd = ret;
-
-			ret = ISFS_Seek(fd, 0x184, 0);
-			if (ret < 0)
-			{
-				//printf("Error! ISFS_Seek (ret = %d)\n", ret);
-				return 0;
-			}
-
-			ret = ISFS_Read(fd,tmd_buf,8);
-			if (ret < 0)
-			{
-				//printf("Error! ISFS_Read (ret = %d)\n", ret);
-				return 0;
-			}
-
-			ret = ISFS_Close(fd);
-			if (ret < 0)
-			{
-				//printf("Error! ISFS_Close (ret = %d)\n", ret);
-				return 0;
-			}
-
-			return be64(tmd_buf);
-
-		} else {
-			// Normal versions of IOS won't have a problem, so we do things the "right" way.
-
-			// Some of this code adapted from bushing's title_lister.c
-			signed_blob *s_tmd = (signed_blob *)tmd_buf;
-			ret = ES_GetStoredTMD(title, s_tmd, tmd_size);
-			if (ret < 0){
-				//printf("Error! ES_GetStoredTMD: %d\n", ret);
-				return -1;
-			}
-			tmd *t = SIGNATURE_PAYLOAD(s_tmd);
-			return t->sys_version;
-		}
-
-
-	}
-	return 0;
 }
 
 static bool GetRegionFromTXT(char* region)
@@ -324,7 +252,9 @@ bool GetSysMenuExecPath(char path[ISFS_MAXPATH], bool mainDOL)
 	u32 cid = GetSysMenuBootContent();
 	if (!cid) return false;
 
-	if (mainDOL) cid |= 0x10000000;
+	if (mainDOL)
+		cid = (cid & ~0xF00000000) | 0x10000000;
+
 	sprintf(path, "/title/00000001/00000002/content/%08x.app", cid);
 
 	return true;
@@ -506,56 +436,20 @@ static bool CompareHashes(bool priiloader)
 
 /* 'WAD Header' structure */
 typedef struct {
-	/* Header length */
 	u32 header_len;
-
-	/* WAD type */
 	u16 type;
-
-	u16 padding;
-
-	/* Data length */
+	u16 version;
 	u32 certs_len;
 	u32 crl_len;
 	u32 tik_len;
 	u32 tmd_len;
 	u32 data_len;
 	u32 footer_len;
-} ATTRIBUTE_PACKED wadHeader;
+} wadHeader;
 
 /* Variables */
-static u8 wadBuffer[BLOCK_SIZE] ATTRIBUTE_ALIGN(32);
-
-s32 __Wad_GetTitleID(FILE *fp, wadHeader *header, u64 *tid)
-{
-	signed_blob *p_tik    = NULL;
-	tik         *tik_data = NULL;
-
-	u32 offset = 0;
-	s32 ret;
-
-	/* Ticket offset */
-	offset += round_up(header->header_len, 64);
-	offset += round_up(header->certs_len,  64);
-	offset += round_up(header->crl_len,    64);
-
-	/* Read ticket */
-	ret = FSOPReadOpenFileA(fp, (void*)&p_tik, offset, header->tik_len);
-	if (ret != 1)
-		goto out;
-
-	/* Ticket data */
-	tik_data = (tik *)SIGNATURE_PAYLOAD(p_tik);
-
-	/* Copy title ID */
-	*tid = tik_data->titleid;
-
-out:
-	/* Free memory */
-	free(p_tik);
-
-	return ret;
-}
+ATTRIBUTE_ALIGN(0x40)
+static u8 wadBuffer[16 << 10];
 
 bool __Wad_FixTicket(signed_blob *s_tik)
 {
@@ -583,7 +477,7 @@ bool __Wad_FixTicket(signed_blob *s_tik)
 			iv[0] = p_tik->titleid;
 			iv[1] = 0;
 
-			AES_Encrypt(WiiCommonKey, 0x10, iv, 0x10, tkeybuf, tkeybuf, sizeof(tkeybuf));
+			ES_Encrypt(ES_KEY_COMMON, (u32 *)iv, tkeybuf, sizeof(tkeybuf), tkeybuf);
 
 			memcpy(p_tik->cipher_title_key, tkeybuf, sizeof(tkeybuf));
 		}
@@ -597,10 +491,7 @@ bool __Wad_FixTicket(signed_blob *s_tik)
 
 bool __Wad_VerifyHeader(wadHeader* header)
 {
-	return
-		header->header_len == 0x20
-	&&	header->type == ('I' << 8 | 's')
-	&&	header->padding == 0x00;
+	return (header->header_len == 0x20 && header->type == 0x4973 && header->version == 0x0000);
 }
 
 const char* wad_strerror(int ec)
@@ -614,10 +505,14 @@ const char* wad_strerror(int ec)
 		case -999:	return "BRICK BLOCKED";
 		case -1010:	return "Wii System memory full!";
 		case -1017:	return "Invalid argument";
+		case -1020: return "Device ID mismatch";
 		case -1022:	return "Content hash mismatch";
+		case -1027: return "Issuer not found in the certificate chain";
+		case -1028: return "Ticket not found";
+		case -1029: return "Invalid Ticket";
 		case -1035:	return "Newer version already installed";
 		case -1036:	return "Needed IOS missing!";
-		case -2011:	return "No trucha bug?";
+		case -2011:	return "No signature check patch?";
 		/*
 		 * from libogc.
 		 * This rarely happens unless the WAD had an invalid ticket/tmd size
@@ -629,6 +524,12 @@ const char* wad_strerror(int ec)
 	}
 }
 
+// Convenience purposes
+u32    hbcList[] = { 0x48415858, 0x4A4F4449, 0xAF1BF516, 0x4C554C5A, 0x4F484243 };
+u32   eulaList[] = { 0x48414B45, 0x48414B50, 0x48414B4A, 0x48414B4B };
+u32 rgnselList[] = { 0x48414C45, 0x48414C50, 0x48414C4A, 0x48414C4B };
+
+
 // Some of the safety checks can block region changing
 // Entering the Konami code turns this true, so it will
 // skip the problematic checks for region changing.
@@ -636,26 +537,26 @@ bool skipRegionSafetyCheck = false;
 
 s32 Wad_Install(FILE *fp)
 {
-	SetPRButtons(false);
-	wadHeader   *header  = NULL;
+	s32          ret;
+	wadHeader   *header  = {};
 	signed_blob *p_certs = NULL, *p_crl = NULL, *p_tik = NULL, *p_tmd = NULL;
+	tmd         *tmd_data  = NULL;
+	u64          tid;
+	tmd_view    *view = NULL;
+	u32          view_size = 0;
+	u32          boot2version;
+	u32          cnt, offset = 0;
+	u32         *installedContents = NULL;
+	u32          installedContentsCount = 0;
 
-	SharedContent* sharedContents = NULL;
-
-	tmd *tmd_data  = NULL;
-
-	u32 cnt, offset = 0;
-	u32 sharedContentsCount = 0;
-	int ret;
-	u64 tid;
 	bool retainPriiloader = false;
 	bool cleanupPriiloader = false;
 
-	printf("\t\t>> Reading WAD data...");
-	fflush(stdout);
+	SetPRButtons(false);
+	printf("\t\t>> Reading WAD data...\n\n");
 	
 	ret = FSOPReadOpenFileA(fp, (void*)&header, offset, sizeof(wadHeader));
-	if (ret != 1)
+	if (ret < 0)
 		goto err;
 
 	if (!__Wad_VerifyHeader(header))
@@ -665,7 +566,9 @@ s32 Wad_Install(FILE *fp)
 	}
 
 	offset += round_up(header->header_len, 64);
-	
+
+/*
+ *	IOS won't let you do this unless you actually call ES_ImportBoot
 	//Don't try to install boot2
 	__Wad_GetTitleID(fp, header, &tid);
 	
@@ -675,10 +578,10 @@ s32 Wad_Install(FILE *fp)
 		ret = -999;
 		goto out;
 	}
-	
+ */
 	/* WAD certificates */
 	ret = FSOPReadOpenFileA(fp, (void*)&p_certs, offset, header->certs_len);
-	if (ret != 1)
+	if (ret < 0)
 		goto err;
 
 	offset += round_up(header->certs_len, 64);
@@ -686,7 +589,7 @@ s32 Wad_Install(FILE *fp)
 	/* WAD crl */
 	if (header->crl_len) {
 		ret = FSOPReadOpenFileA(fp, (void*)&p_crl, offset, header->crl_len);
-		if (ret != 1)
+		if (ret < 0)
 			goto err;
 
 		offset += round_up(header->crl_len, 64);
@@ -694,140 +597,159 @@ s32 Wad_Install(FILE *fp)
 
 	/* WAD ticket */
 	ret = FSOPReadOpenFileA(fp, (void*)&p_tik, offset, header->tik_len);
-	if (ret != 1)
+	if (ret < 0)
 		goto err;
-
-	bool isvWiiTitle = __Wad_FixTicket(p_tik);
 
 	offset += round_up(header->tik_len, 64);
 
 	/* WAD TMD */
 	ret = FSOPReadOpenFileA(fp, (void*)&p_tmd, offset, header->tmd_len);
-	if (ret != 1)
+	if (ret < 0)
 		goto err;
 
 	offset += round_up(header->tmd_len, 64);
 
-	Con_ClearLine();
+	bool isvWiiTitle = __Wad_FixTicket(p_tik);
 	
 	/* Get TMD info */
 	
 	tmd_data = (tmd *)SIGNATURE_PAYLOAD(p_tmd);
+	tid = tmd_data->title_id;
 
 	if (TITLE_UPPER(tmd_data->sys_version) == 0) // IOS
 	{
-		if ((isvWiiTitle || tmd_data->vwii_title)  ^ IS_WIIU) // xor is one of my favourite binary operators of all time
+		bool stubbed = (tmd_data->title_version & 0xFF) == 0 || tmd_data->title_version == 404;
+		bool isCrossPlatformIOS = (isvWiiTitle || tmd_data->vwii_title) ^ IS_WIIU; // xor is one of my favourite binary operators of all time
+
+		if (isCrossPlatformIOS && !skipRegionSafetyCheck)
 		{
-			printf("\n    Cannot install vWii IOS on Wii\n    or Wii IOS on vWii.\n");
+			printf("	Cannot install vWii IOS on Wii\n");
+			printf("	or Wii IOS on vWii.\n");
+			printf("	I mean maybe you can. I'm not going to find out though\n");
 			ret = -999;
 			goto err;
 		}
 
-		if(tid == get_title_ios(TITLE_ID(1, 2)))
+		ret = Title_GetTMDView(0x100000002LL, &view, &view_size);
+		if (ret < 0)
 		{
-			if (tmdIsStubIOS(tmd_data))
+			printf("	Hey, where's Perry?\n\n");
+
+			printf("	(No really, where is your Wii System Menu?)\n");
+			goto err;
+		}
+
+		if (view->sys_version == tmd_data->title_id)
+		{
+			if (isCrossPlatformIOS)
 			{
-				printf("\n    I won't install a stub System Menu IOS\n");
+				printf("	Anything but the System menu's IOS...!!!!\n");
 				ret = -999;
 				goto err;
 			}
 
-			// this code feels like a MESS
-			else if (!IS_WIIU && (tid == TITLE_ID(1, 70) || tid == TITLE_ID(1, 80)))
+			if (stubbed) {
+				printf("	I won't install a stub System Menu IOS\n");
+				ret = -999;
+				goto err;
+			}
+
+			if (!IS_WIIU && (view->title_version >> 5) >= 15) // 4.2 or later. Again.
 			{
 				tik* ticket = (tik*)SIGNATURE_PAYLOAD(p_tik);
 
-				__aligned(0x10)
+				__aligned(0x20)
 				aeskey titlekey;
 				u64 iv[2] = { tid };
 
-
 				memcpy(titlekey, ticket->cipher_title_key, sizeof(aeskey));
-				AES_Decrypt(WiiCommonKey, sizeof(aeskey), iv, sizeof(iv), titlekey, titlekey, sizeof(aeskey));
+				ES_Decrypt(ES_KEY_COMMON, (u32 *)iv, titlekey, sizeof(aeskey), titlekey);
 
 				u32 content0_offset = offset;
-				for (tmd_content* con = tmd_data->contents; con < tmd_data->contents + tmd_data->num_contents; con++)
+				for (int i = 0; i < tmd_data->num_contents; i++)
 				{
-					if (con->index == 0) break;
-					content0_offset += round_up(con->size, 0x40);
+					if (tmd_data->contents[i].index == 0) break;
+					content0_offset += round_up(tmd_data->contents[i].size, 0x40);
 				}
 
 				__aligned(0x20)
 				cIOSInfo build_tag = {};
 
-				ret = FSOPReadOpenFile(fp, (void*)&build_tag, content0_offset, sizeof(cIOSInfo));
-				if (ret != 1)
+				ret = FSOPReadOpenFile(fp, (void*)&build_tag, content0_offset, sizeof(build_tag));
+				if (ret < 0)
 					goto err;
 
 				iv[0] = 0;
 				iv[1] = 0;
-				AES_Decrypt(titlekey, sizeof(aeskey), iv, sizeof(iv), &build_tag, &build_tag, sizeof(cIOSInfo));
+				AES_Decrypt(titlekey, sizeof(aeskey), iv, sizeof(iv), &build_tag, &build_tag, sizeof(build_tag));
 
 				if ((build_tag.hdr_magic != CIOS_INFO_MAGIC ||
 					build_tag.hdr_version != CIOS_INFO_VERSION ||
 					build_tag.ios_base != 60) && ES_CheckHasKoreanKey())
 				{
-					printf("\n"
-						"	Installing this System menu IOS will brick your Wii.\n"
-						"	Please remove the Korean key via KoreanKii,\n"
-						"	then try again.\n\n"
-					);
+					printf("	Installing this System menu IOS will brick your Wii.\n\n");
+
+					printf("	Please remove the Korean key via KoreanKii,\n");
+					printf("	then try again.\n");
 
 					ret = -999;
 					goto err;
 				}
 			}
 		}
-		
-		if(tid  == get_title_ios(TITLE_ID(0x10008, 0x48414B00 | 'E'))
-		|| tid  == get_title_ios(TITLE_ID(0x10008, 0x48414B00 | 'P'))
-		|| tid  == get_title_ios(TITLE_ID(0x10008, 0x48414B00 | 'J'))
-		|| tid  == get_title_ios(TITLE_ID(0x10008, 0x48414B00 | 'K')))
+
+		if (stubbed)
 		{
-			if (tmdIsStubIOS(tmd_data))
+			u64 sysvers = 0;
+
+			for (int i = 0; i < 4; i++)
 			{
-				printf("\n    I won't install a stub EULA IOS\n");
-				ret = -999;
-				goto err;
+				if ((Title_GetSysVersion(TITLE_ID(0x00010008, eulaList[i]), &sysvers) == 0) && tid == sysvers)
+				{
+					printf("	I won't install a stub EULA IOS\n");
+					ret = -999;
+					goto err;
+				}
+
+				if ((Title_GetSysVersion(TITLE_ID(0x00010008, rgnselList[i]), &sysvers) == 0) && tid == sysvers)
+				{
+					printf("	I won't install a stub Region select IOS\n");
+					ret = -999;
+					goto err;
+				}
 			}
-		}
-		
-		if(tid == get_title_ios(TITLE_ID(0x10008, 0x48414C00 | 'E'))
-		|| tid == get_title_ios(TITLE_ID(0x10008, 0x48414C00 | 'P'))
-		|| tid == get_title_ios(TITLE_ID(0x10008, 0x48414C00 | 'J'))
-		|| tid == get_title_ios(TITLE_ID(0x10008, 0x48414C00 | 'K')))
-		{
-			if (tmdIsStubIOS(tmd_data))
+
+			for (int i = 0; i < 5; i++)
 			{
-				printf("\n    I won't install a stub rgnsel IOS\n");
-				ret = -999;
-				goto err;
-			}
-		}
-		if(tid == get_title_ios(TITLE_ID(0x10001, 0x48415858))
-		|| tid == get_title_ios(TITLE_ID(0x10001, 0x4A4F4449))
-		|| tid == get_title_ios(TITLE_ID(0x10001, 0xAF1BF516))
-		|| tid == get_title_ios(TITLE_ID(0x10001, 0x4C554C5A))
-		|| tid == get_title_ios(TITLE_ID(0x10001, 0x4F484243)))
-		{
-			if (tmdIsStubIOS(tmd_data))
-			{
-				printf("\n    I won't stub Homebrew Channel's IOS\n");
-				ret = -999;
-				goto err;
+				if ((Title_GetSysVersion(TITLE_ID(0x00010001, hbcList[i]), &sysvers) == 0) && tid == sysvers)
+				{
+					printf("	I won't stub The Homebrew Channel's IOS\n");
+					ret = -999;
+					goto err;
+				}
 			}
 		}
 	}
 	else // not IOS
 	{
-		if (isIOSstub(TITLE_LOWER(tmd_data->sys_version)))
+		ret = Title_GetTMDView(tmd_data->sys_version, &view, &view_size);
+
+		if (ret < 0)
 		{
-			printf("\n    This Title wants IOS%i but the installed version\n    is a stub.\n", TITLE_LOWER(tmd_data->sys_version));
+			printf("	This title wants IOS%i, but the installed ver-...\n", TITLE_LOWER(tmd_data->sys_version));
+			printf("	...is it even installed?\n");
+			goto err;
+		}
+
+		if ((view->title_version & 0xFF) == 0 || view->title_version == 404)
+		{
+			printf("	This title wants IOS%i, but the installed version\n", TITLE_LOWER(tmd_data->sys_version));
+			printf("	is a stub.\n");
 			ret = -1036;
 			goto err;
 		}
 		
-		if (tid == TITLE_ID(1, 2))
+		if (tid == 0x100000002LL)
 		{
 			if (skipRegionSafetyCheck || gForcedInstall)
 				goto skipChecks;
@@ -839,17 +761,18 @@ s32 Wad_Install(FILE *fp)
 			
 			if (isvWiiTitle || tmd_data->vwii_title) // && !IS_WIIU ? :thinking:
 			{
-				printf("\n    I won't install a vWii SM by default.\n\n");
-				printf("\n    If you're really sure what you're doing, next time\n");
-				printf("    select your device using Konami...\n\n");
+				printf("	I won't install a vWii SM by default.\n\n");
+
+				printf("	If you're really sure about what you're doing, next time\n");
+				printf("    select your device using Konami...\n");
 
 				ret = -999;
 				goto err;
 			}
 			
-			if(region == 0)
+			if (region == '\0')
 			{
-				printf("\n    Unknown System menu region\n    Please check the site for updates\n");
+				printf("	Unknown System menu region. What's up with setting.txt?\n");
 				
 				ret = -999;
 				goto err;
@@ -857,10 +780,11 @@ s32 Wad_Install(FILE *fp)
 
 			if (!VersionIsOriginal(tmd_data->title_version))
 			{
-				printf("\n    I won't install an unknown SM versions by default.\n\n");
-				printf("\n    Are you installing a tweaked system menu?\n");
-				printf("\n    If you're really sure what you're doing, next time\n");
-				printf("    select your device using Konami...\n\n");
+				printf("	I won't install an unknown SM versions by default.\n\n");
+
+				printf("	Are you installing a tweaked system menu?\n");
+				printf("	If you're really sure what you're doing, next time\n");
+				printf("	select your device using Konami...\n");
 
 				ret = -999;
 				goto err;
@@ -869,9 +793,10 @@ s32 Wad_Install(FILE *fp)
 			if(region != RegionLookupTable[(tmd_data->title_version & 0x0F)])
 			{
 				printf("\n    I won't install the wrong regions SM by default.\n\n");
+
 				printf("\n    Are you region changing?\n");
 				printf("\n    If you're really sure what you're doing, next time\n");
-				printf("    select your device using Konami...\n\n");
+				printf("    select your device using Konami...\n");
 				
 				ret = -999;
 				goto err;
@@ -882,15 +807,12 @@ s32 Wad_Install(FILE *fp)
 			{
 				cIOSInfo ios_info;
 
-				if (ES_CheckHasKoreanKey() &&
-					(!Title_GetcIOSInfo(TITLE_LOWER(tmd_data->sys_version), &ios_info) ||
-					ios_info.ios_base != 60))
+				if ((Title_GetcIOSInfo(TITLE_LOWER(tmd_data->sys_version), &ios_info) != 0 ||
+					ios_info.ios_base != 60) && ES_CheckHasKoreanKey())
 				{
-					printf("\n"
-						"	Installing this System menu will brick your Wii.\n"
-						"	Please remove the Korean key via KoreanKii,\n"
-						"	then try again.\n\n"
-					);
+					printf("	Installing this System menu will brick your Wii.\n");
+					printf("	Please remove the Korean key via KoreanKii,\n");
+					printf("	then try again.\n");
 
 					ret = -999;
 					goto err;
@@ -900,21 +822,25 @@ s32 Wad_Install(FILE *fp)
 skipChecks:
 			if (tmd_data->title_version < 416)
 			{
+				ES_GetBoot2Version(&boot2version);
 				if(boot2version == 4)
 				{
-					printf("\n    This version of the System Menu\n    is not compatible with your Wii\n");
+					printf("	This version of the System Menu\n");
+					printf("	is not compatible with your Wii\n");
 					ret = -999;
 					goto err;
 				}
 			}
 
-			if (!gForcedInstall && AHBPROT_DISABLED && IsPriiloaderInstalled())
+			if (!gForcedInstall && IsPriiloaderInstalled())
 			{
 				cleanupPriiloader = true;
-				printf("\n    Priiloader is installed next to the system menu.\n\n");
-				printf("    It is recommended to retain Priiloader as it can\n");
-				printf("    protect your console from being bricked.\n\n");
-				printf("    Press A to retain Priiloader or B to remove.");
+				printf("	Priiloader is installed next to the system menu.\n\n");
+
+				printf("	It is recommended to retain Priiloader as it can\n");
+				printf("	protect your console from being bricked.\n\n");
+
+				printf("	Press A to retain Priiloader or B to remove.");
 
 				u32 buttons = WaitButtons();
 
@@ -989,26 +915,22 @@ skipChecks:
 	}
 #endif
 
-	printf("\t\t>> Installing ticket...");
-	fflush(stdout);
+	printf("\t\t>> Installing ticket...\n");
 
 	/* Install ticket */
 	ret = ES_AddTicket(p_tik, header->tik_len, p_certs, header->certs_len, p_crl, header->crl_len);
 	if (ret < 0)
 		goto err;
 
-	Con_ClearLine();
-
-	printf("\r\t\t>> Installing title...");
-	fflush(stdout);
+	printf("\t\t>> Installing title...\n");
 
 	/* Install title */
 	ret = ES_AddTitleStart(p_tmd, header->tmd_len, p_certs, header->certs_len, p_crl, header->crl_len);
 	if (ret < 0)
 		goto err;
 
-	/* Get list of currently installed shared contents */
-	Title_GetSharedContents(&sharedContents, &sharedContentsCount);
+	/* Get list of currently installed contents */
+	Title_GetTMDContents(p_tmd, &installedContents, &installedContentsCount);
 	
 	/* Install contents */
 	for (cnt = 0; cnt < tmd_data->num_contents; cnt++) 
@@ -1021,23 +943,21 @@ skipChecks:
 		/* Encrypted content size */
 		len = round_up(content->size, 64);
 
-		if (Title_SharedContentPresent(content, sharedContents, sharedContentsCount))
-		{
-			offset += len;
-			continue;
-		}
+		if (content->type & 0x8000) // We're only doing shared. Unless we're going to genuinely read the non-shared contents and check the hash against what we're installing
+			for (int i = 0; i < installedContentsCount; i++)
+				if (installedContents[i] == content->cid)
+				{
+					offset += len;
+					continue;
+				}
 
 		Con_ClearLine();
-		printf("\r\t\t>> Installing content #%02d...", content->cid);
-		fflush(stdout);
+		printf("\r\t\t>> Installing content #%02d...", content->index);
 
 		/* Install content */
-		cfd = ES_AddContentStart(tmd_data->title_id, content->cid);
-		if (cfd < 0) 
-		{
-			ret = cfd;
+		ret = cfd = ES_AddContentStart(tmd_data->title_id, content->cid);
+		if (ret < 0)
 			goto err;
-		}
 
 		/* Install content data */
 		while (idx < len) 
@@ -1046,12 +966,12 @@ skipChecks:
 
 			/* Data length */
 			size = (len - idx);
-			if (size > BLOCK_SIZE)
-				size = BLOCK_SIZE;
+			if (size > sizeof(wadBuffer))
+				size = sizeof(wadBuffer);
 
 			/* Read data */
-			ret = FSOPReadOpenFile(fp, &wadBuffer, offset, size);
-			if (ret != 1)
+			ret = FSOPReadOpenFile(fp, wadBuffer, offset, size);
+			if (ret < 0)
 			{
 				ES_AddContentFinish(cfd);
 				goto err;
@@ -1183,7 +1103,7 @@ skipChecks:
 	}
 
 err:
-	printf("\n    ERROR! (ret = %d)\n", ret);
+	printf("\n	ERROR! (ret = %d)\n", ret);
 
 	if (retainPriiloader)
 		SetPriiloaderOption(false);
@@ -1200,7 +1120,8 @@ out:
 	free(p_crl);
 	free(p_tik);
 	free(p_tmd);
-	free(sharedContents);
+	free(installedContents);
+	free(view);
 
 	if (gForcedInstall)
 		return Wad_Install(fp);
@@ -1211,30 +1132,30 @@ out:
 
 s32 Wad_Uninstall(FILE *fp)
 {
-	SetPRButtons(false);
-	wadHeader   *header   = NULL;
-	tikview     *viewData = NULL;
+	wadHeader   *header   = {};
+
+	tikview     *tikviews = NULL;
 	signed_blob *s_tik    = NULL;
 	signed_blob *s_tmd    = NULL;
 
-	u64 tid;
+	u64 tid, sysvers;
 	u32 viewCnt;
 	int ret;
 
-	printf("\t\t>> Reading WAD data...");
-	fflush(stdout);
+	SetPRButtons(false);
+	printf("\t\t>> Reading WAD data...\n");
 
 	/* WAD header */
 	ret = FSOPReadOpenFileA(fp, (void*)&header, 0, sizeof(wadHeader));
-	if (ret != 1)
+	if (ret < 0)
 	{
-		printf(" ERROR! (ret = %d)\n", ret);
+		printf("	ERROR! (ret = %d)\n", ret);
 		goto out;
 	}
 
 	if (!__Wad_VerifyHeader(header))
 	{
-		puts("\t\tInvalid WAD file?");
+		puts("	Invalid WAD file?");
 		ret = ES_EINVAL;
 		goto out;
 	}
@@ -1246,8 +1167,8 @@ s32 Wad_Uninstall(FILE *fp)
 	offset += round_up(header->crl_len,    0x40);
 
 	ret = FSOPReadOpenFileA(fp, (void*)&s_tik, offset, header->tik_len);
-	if (ret != 1) {
-		printf(" ERROR! (ret = %d)\n", ret);
+	if (ret < 0) {
+		printf("	ERROR! (ret = %d)\n", ret);
 		goto out;
 	}
 
@@ -1257,8 +1178,8 @@ s32 Wad_Uninstall(FILE *fp)
 
 	offset += round_up(header->tik_len, 0x40);
 	ret = FSOPReadOpenFileA(fp, (void*)&s_tmd, offset, header->tmd_len);
-	if (ret != 1) {
-		printf(" ERROR! (ret = %d)\n", ret);
+	if (ret < 0) {
+		printf("	ERROR! (ret = %d)\n", ret);
 		goto out;
 	}
 
@@ -1267,134 +1188,91 @@ s32 Wad_Uninstall(FILE *fp)
 	//Assorted Checks
 	if (TITLE_UPPER(tid) == 0x1)
 	{
-		if (!get_title_ios(TITLE_ID(1, 2)))
+		if ((ret = Title_GetSysVersion(0x100000002LL, &sysvers)) != 0)
 		{
-			printf("\n    I can't determine the System Menus IOS\nDeleting system titles is disabled\n");
-			ret = -999;
+			printf("	I can't determine the System Menus IOS\n");
+			printf("	Deleting system titles is disabled\n");
 			goto out;
 		}
 		if (((isvWiiTitle || tmd_data->vwii_title) ^ IS_WIIU) && !skipRegionSafetyCheck) // Only this way around this time // Ehh nvm
 		{
-			printf("\n"
-				"    Attempting to uninstall a Wii IOS WAD on vWii.\n"
-				"    or a vWii IOS WAD on Wii.\n\n"
+			printf(
+				"	Attempting to uninstall a Wii IOS WAD on vWii.\n"
+				"	or a vWii IOS WAD on Wii.\n\n"
 
-				"    Maybe you installed one on accident before?\n\n"
+				"	Maybe you installed one on accident before?\n\n"
 
-				"    If you're sure about what you're doing, input\n"
-				"    the Konami code on the device screen. Have fun.\n");
+				"	If you're sure about what you're doing, input\n"
+				"	the Konami code on the device screen. Have fun.\n");
 
 			ret = -999;
 			goto out;
 		}
-		if (tid == TITLE_ID(1, 1))
+		if (tid == 0x100000001LL)
 		{
-			printf("\n    I won't try to uninstall boot2\n");
+			printf("	I won't try to uninstall boot2\n");
 			ret = -999;
 			goto out;
 		}
-		if (tid == TITLE_ID(1, 2))
+		if (tid == 0x100000002LL)
 		{
-			printf("\n    I won't uninstall the System Menu\n");
+			printf("	I won't uninstall the System Menu\n");
 			ret = -999;
 			goto out;
 		}
-		if (tid == get_title_ios(TITLE_ID(1, 2)))
+		if (tid == sysvers)
 		{
-			printf("\n    I won't uninstall the System Menus IOS\n");
+			printf("	I won't uninstall the System Menu's IOS\n");
 			ret = -999;
 			goto out;
 		}
-		if (tid == get_title_ios(TITLE_ID(0x10001, 0x48415858))
-		||  tid == get_title_ios(TITLE_ID(0x10001, 0x4A4F4449))
-		||  tid == get_title_ios(TITLE_ID(0x10001, 0xAF1BF516))
-		||  tid == get_title_ios(TITLE_ID(0x10001, 0x4C554C5A))
-		||  tid == get_title_ios(TITLE_ID(0x10001, 0x4F484243)))
+
+		for (int i = 0; i < 5; i++)
 		{
-			printf("\n    I won't uninstall the Homebrew Channel's IOS!\n");
-			ret = -999;
-			goto out;
+			if ((Title_GetSysVersion(TITLE_ID(0x00010001, hbcList[5 - i]), &sysvers) == 0) && tid == sysvers)
+			{
+				printf("	I won't uninstall the Homebrew Channel's IOS!\n");
+				ret = -999;
+				goto out;
+			}
 		}
 	}
 
 	char region = 0;
 	GetSysMenuRegion(NULL, &region);
 	
-	if((tid  == TITLE_ID(0x10008, 0x48414B00 | 'E') || tid  == TITLE_ID(0x10008, 0x48414B00 | 'P') || tid  == TITLE_ID(0x10008, 0x48414B00 | 'J') || tid  == TITLE_ID(0x10008, 0x48414B00 | 'K') 
-	|| (tid  == TITLE_ID(0x10008, 0x48414C00 | 'E') || tid  == TITLE_ID(0x10008, 0x48414C00 | 'P') || tid  == TITLE_ID(0x10008, 0x48414C00 | 'J') || tid  == TITLE_ID(0x10008, 0x48414C00 | 'K')))
-	&& region == 0)
+	if (((tid | 0xFF) == 0x0001000848414CFFLL || (tid | 0xFF) == 0x0001000848414BFFLL) && strchr("JEPK", (char)tid) && region == 0)
 	{
-		printf("\n    Unknown SM region\n    Please check the site for updates\n");
+		printf("	Unknown System Menu region\n    Please check the site for updates\n");
 		ret = -999;
 		goto out;
 	}
-	if(tid  == TITLE_ID(0x10008, 0x48414B00 | region))
+	if (tid  == TITLE_ID(0x10008, 0x48414B00 | region))
 	{
-		printf("\n    I won't uninstall the EULA\n");
+		printf("	I won't uninstall the EULA\n");
 		ret = -999;
 		goto out;
 	}	
-	if(tid  == TITLE_ID(0x10008, 0x48414C00 | region))
+	if (tid  == TITLE_ID(0x10008, 0x48414C00 | region))
 	{
-		printf("\n    I won't uninstall rgnsel\n");
+		printf("	I won't uninstall rgnsel\n");
 		ret = -999;
 		goto out;
 	}	
-	if(tid  == get_title_ios(TITLE_ID(0x10008, 0x48414B00 | region)))
+	if (Title_GetSysVersion(0x0001000848414B00LL | region, &sysvers) == 0 && tid == sysvers)
 	{
-		printf("\n    I won't uninstall the EULAs IOS\n");
+		printf("	I won't uninstall the EULAs IOS\n");
 		ret = -999;
 		goto out;
-	}	
-	if(tid  == get_title_ios(TITLE_ID(0x10008, 0x48414C00 | region)))
+	}
+	if (Title_GetSysVersion(0x0001000848414C00LL | region, &sysvers) == 0 && tid == sysvers)
 	{
-		printf("\n    I won't uninstall the rgnsel IOS\n");
+		printf("	I won't uninstall rgnsel's IOS\n");
 		ret = -999;
 		goto out;
 	}
 
-	Con_ClearLine();
-
-	/* Why don't we do this the other way around? Delete title contents, delete TMD, delete ticket. Seems more natural. */
-
-	printf("\t\t>> Deleting tickets...");
-	fflush(stdout);
-
-	/* Get ticket views */
-	ret = Title_GetTicketViews(tid, &viewData, &viewCnt);
-	if (ret < 0)
-		printf(" ERROR! (ret = %d)\n", ret);
-
-	/* Delete tickets */
-	else {
-		u32 cnt;
-		static tikview view ATTRIBUTE_ALIGN(0x20);
-
-		/* Delete all tickets */
-		for (cnt = 0; cnt < viewCnt; cnt++) {
-			memcpy(&view, viewData + cnt, sizeof(tikview));
-
-			if (view.devicetype)
-			{
-				u32 deviceID = 0;
-				/* If we failed to get the ID or it actually matches, skip this */
-				if (ES_GetDeviceID(&deviceID) || view.devicetype == deviceID) continue;
-			}
-
-			ret = ES_DeleteTicket(&view);
-			if (ret < 0)
-				break;
-		}
-
-		if (ret < 0)
-			printf(" ERROR! (ret = %d)\n", ret);
-		else
-			printf(" OK!\n");
-	}
-	free(viewData);
-
-	printf("\t\t>> Deleting title contents...");
-	fflush(stdout);
+	printf("\t\t>> Deleting title contents... ");
 
 	/* Delete title contents */
 	ret = ES_DeleteTitleContent(tid);
@@ -1405,7 +1283,6 @@ s32 Wad_Uninstall(FILE *fp)
 
 
 	printf("\t\t>> Deleting title...");
-	fflush(stdout);
 
 	/* Delete title */
 	ret = ES_DeleteTitle(tid);
@@ -1414,6 +1291,39 @@ s32 Wad_Uninstall(FILE *fp)
 	else
 		printf(" OK!\n");
 
+	printf("\t\t>> Deleting tickets...");
+
+	/* Get ticket views */
+	ret = Title_GetTicketViews(tid, &tikviews, &viewCnt);
+	if (ret < 0)
+		printf(" ERROR! (ret = %d)\n", ret);
+
+	/* Delete tickets */
+	else
+	{
+		u32 cnt;
+
+		/* Delete all tickets */
+		for (cnt = 0; cnt < viewCnt; cnt++) {
+#if 0
+			if (view.devicetype)
+			{
+				u32 deviceID = 0;
+				/* If we failed to get the ID or it actually matches, skip this */
+				if (ES_GetDeviceID(&deviceID) || view.devicetype == deviceID) continue;
+			}
+#endif
+			ret = ES_DeleteTicket(&tikviews[cnt]);
+			if (ret < 0)
+				break;
+		}
+
+		if (ret < 0)
+			printf(" ERROR! (ret = %d)\n", ret);
+		else
+			printf(" OK!\n");
+	}
+	free(tikviews);
 out:
 	/* Free memory */
 	free(header);

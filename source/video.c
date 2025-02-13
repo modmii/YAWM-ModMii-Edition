@@ -8,11 +8,15 @@
 static void *framebuffer = NULL;
 static GXRModeObj *vmode = NULL;
 
+/* Console Variables */
+int g_consoleWidth, g_consoleHeight;
 
 void Con_Init(u32 x, u32 y, u32 w, u32 h)
 {
 	/* Create console in the framebuffer */
 	CON_InitEx(vmode, x, y, w, h);
+
+	CON_GetMetrics(&g_consoleWidth, &g_consoleHeight);
 }
 
 void Con_Clear(void)
@@ -24,17 +28,13 @@ void Con_Clear(void)
 
 void Con_ClearLine(void)
 {
-	int cols, rows;
 	u32 cnt;
 
 	printf("\r");
 	fflush(stdout);
 
-	/* Get console metrics */
-	CON_GetMetrics(&cols, &rows);
-
 	/* Erase line */
-	for (cnt = 1; cnt < cols; cnt++) {
+	for (cnt = 1; cnt < g_consoleWidth; cnt++) {
 		printf(" ");
 		fflush(stdout);
 	}
@@ -59,15 +59,11 @@ void Con_BgColor(u32 color, u8 bold)
 
 void Con_FillRow(u32 row, u32 color, u8 bold)
 {
-	int cols, rows;
 	u32 cnt;
 
 	/* Set color */
 	printf("\x1b[%u;%um", color + 40, bold);
 	fflush(stdout);
-
-	/* Get console metrics */
-	CON_GetMetrics(&cols, &rows);
 
 	/* Save current row and col */
 	printf("\x1b[s");
@@ -78,7 +74,7 @@ void Con_FillRow(u32 row, u32 color, u8 bold)
 	fflush(stdout);
 
 	/* Fill row */
-	for (cnt = 0; cnt < cols; cnt++) {
+	for (cnt = 0; cnt < g_consoleWidth; cnt++) {
 		printf(" ");
 		fflush(stdout);
 	}
@@ -92,22 +88,10 @@ void Con_FillRow(u32 row, u32 color, u8 bold)
 	Con_FgColor(7, 1);
 }
 
-void Video_Configure(GXRModeObj *rmode)
+void Video_Init(void)
 {
-	/* Configure the video subsystem */
-	VIDEO_Configure(rmode);
+	VIDEO_Init();
 
-	/* Setup video */
-	VIDEO_SetBlack(FALSE);
-	VIDEO_Flush();
-	VIDEO_WaitVSync();
-
-	if (rmode->viTVMode & VI_NON_INTERLACE)
-		VIDEO_WaitVSync();
-}
-
-void Video_SetMode(void)
-{
 	/* Select preferred video mode */
 	vmode = VIDEO_GetPreferredMode(NULL);
 
@@ -127,7 +111,7 @@ void Video_SetMode(void)
 		VIDEO_WaitVSync();
 
 	/* Clear the screen */
-	Video_Clear(COLOR_BLACK);
+	Video_Clear(COLOR_RED);
 }
 
 void Video_Clear(s32 color)

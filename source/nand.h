@@ -20,6 +20,8 @@ typedef struct
 	int type;
 } NameList;
 
+extern nandDevice ndevList[];
+extern const int ndevCount;
 
 /* Prototypes */
 s32 Nand_Mount(nandDevice *);

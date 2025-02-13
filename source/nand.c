@@ -4,13 +4,21 @@
 #include <string.h>
 
 #include "nand.h"
-#include "malloc.h"
+#include "utils.h"
 #include "fileops.h"
 
 /* Buffer */
 static u32 inbuf[8] ATTRIBUTE_ALIGN(32);
 static bool gNandInitialized = false;
 
+/* NAND device list */
+nandDevice ndevList[] =
+{
+	{ "Disable",						0,	0x00,	0x00 },
+	{ "SD/SDHC Card",					1,	0xF0,	0xF1 },
+	{ "USB 2.0 Mass Storage Device",	2,	0xF2,	0xF3 },
+};
+const int ndevCount = (sizeof(ndevList) / sizeof(nandDevice));
 
 s32 Nand_Mount(nandDevice *dev)
 {

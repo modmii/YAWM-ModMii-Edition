@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 #include <string.h>
 #include <limits.h>
 #include <ogcsys.h>
@@ -10,7 +11,6 @@
 #include "nand.h"
 #include "sha1.h"
 #include "utils.h"
-#include "otp.h"
 #include "malloc.h"
 
 s32 Title_ZeroSignature(signed_blob *p_sig)
@@ -185,13 +185,32 @@ err:
 	return ret;
 }
 
+s32 Title_GetTMDContents(signed_blob *s_tmd, u32 **contents, u32 *num_contents)
+{
+	s32 ret;
+
+	ret = ES_GetNumStoredTMDContents(s_tmd, SIGNED_TMD_SIZE(s_tmd), num_contents);
+	if (ret < 0)
+		return ret;
+
+	*contents = memalign32(*num_contents * sizeof(u32));
+	if (!*contents)
+		return -1;
+
+	ret = ES_GetStoredTMDContents(s_tmd, SIGNED_TMD_SIZE(s_tmd), *contents, *num_contents);
+	if (ret >= 0)
+		return ret;
+
+	free(*contents);
+	*contents = NULL;
+	*num_contents = 0;
+	return ret;
+}
+
 s32 Title_GetTMDView(u64 tid, tmd_view** outbuf, u32* outlen)
 {
 	s32 ret;
 	u32 view_sz = 0;
-
-	*outbuf = NULL;
-	*outlen = 0;
 
 	ret = ES_GetTMDViewSize(tid, &view_sz);
 	if (ret < 0)
@@ -210,79 +229,66 @@ s32 Title_GetTMDView(u64 tid, tmd_view** outbuf, u32* outlen)
 	return 0;
 
 fail:
+	*outbuf = NULL;
+	*outlen = 0;
 	free(view);
 	return ret;
 }
 
 s32 Title_GetVersion(u64 tid, u16 *outbuf)
 {
-	signed_blob *p_tmd = NULL;
-	tmd      *tmd_data = NULL;
-
-	u32 len;
 	s32 ret;
+	tmd_view *view = NULL;
+	u32 len;
 
 	/* Get title TMD */
-	ret = Title_GetTMD(tid, &p_tmd, &len);
+	ret = Title_GetTMDView(tid, &view, &len);
 	if (ret < 0)
 		return ret;
 
-	/* Retrieve TMD info */
-	tmd_data = (tmd *)SIGNATURE_PAYLOAD(p_tmd);
-
 	/* Set values */
-	*outbuf = tmd_data->title_version;
+	*outbuf = view->title_version;
 
 	/* Free memory */
-	free(p_tmd);
+	free(view);
 
 	return 0;
 }
 
 s32 Title_GetSysVersion(u64 tid, u64 *outbuf)
 {
-	signed_blob *p_tmd = NULL;
-	tmd      *tmd_data = NULL;
-
-	u32 len;
 	s32 ret;
+	tmd_view *view = NULL;
+	u32 len;
 
 	/* Get title TMD */
-	ret = Title_GetTMD(tid, &p_tmd, &len);
+	ret = Title_GetTMDView(tid, &view, &len);
 	if (ret < 0)
 		return ret;
 
-	/* Retrieve TMD info */
-	tmd_data = (tmd *)SIGNATURE_PAYLOAD(p_tmd);
-
 	/* Set values */
-	*outbuf = tmd_data->sys_version;
+	*outbuf = view->sys_version;
 
 	/* Free memory */
-	free(p_tmd);
+	free(view);
 
 	return 0;
 }
 
 s32 Title_GetSize(u64 tid, u32 *outbuf)
 {
-	signed_blob *p_tmd = NULL;
-	tmd      *tmd_data = NULL;
-
-	u32 cnt, len, size = 0;
 	s32 ret;
+	tmd_view *view = NULL;
+	u32 len, size = 0;
 
 	/* Get title TMD */
-	ret = Title_GetTMD(tid, &p_tmd, &len);
+	ret = Title_GetTMDView(tid, &view, &len);
 	if (ret < 0)
 		return ret;
 
-	/* Retrieve TMD info */
-	tmd_data = (tmd *)SIGNATURE_PAYLOAD(p_tmd);
-
 	/* Calculate title size */
-	for (cnt = 0; cnt < tmd_data->num_contents; cnt++) {
-		tmd_content *content = &tmd_data->contents[cnt];
+	for (int cnt = 0; cnt < view->num_contents; cnt++) {
+		tmd_view_content *content = &view->contents[cnt];
 
 		/* Add content size */
 		size += content->size;
@@ -297,7 +303,7 @@ s32 Title_GetSize(u64 tid, u32 *outbuf)
 	return 0;
 }
 
-s32 Title_GetIOSVersions(u8 **outbuf, u32 *outlen)
+s32 Title_GetIOSVersions(u8 *outbuf, u32 *outlen)
 {
 	u8  *buffer = NULL;
 	u64 *list   = NULL;
@@ -310,23 +316,6 @@ s32 Title_GetIOSVersions(u8 **outbuf, u32 *outlen)
 	if (ret < 0)
 		return ret;
 
-	/* Count IOS */
-	for (cnt = idx = 0; idx < count; idx++) {
-		u32 tidh = (list[idx] >> 32);
-		u32 tidl = (list[idx] &  0xFFFFFFFF);
-
-		/* Title is IOS */
-		if ((tidh == 0x1) && (tidl >= 3) && (tidl <= 255))
-			cnt++;
-	}
-
-	/* Allocate memory */
-	buffer = memalign32(cnt);
-	if (!buffer) {
-		ret = -1;
-		goto out;
-	}
-
 	/* Copy IOS */
 	for (cnt = idx = 0; idx < count; idx++) {
 		u32 tidh = (list[idx] >> 32);
@@ -338,63 +327,24 @@ s32 Title_GetIOSVersions(u8 **outbuf, u32 *outlen)
 	}
 
 	/* Set values */
-	*outbuf = buffer;
 	*outlen = cnt;
 
-	goto out;
-
-out:
 	/* Free memory */
 	free(list);
 
 	return ret;
 }
 
-s32 Title_GetSharedContents(SharedContent** out, u32* count)
+s32 Title_GetcIOSInfo(int ios, cIOSInfo* out)
 {
-	if (!out || !count) return false;
-
-	u32 size;
-	SharedContent* buf = (SharedContent*)NANDLoadFile("/shared1/content.map", &size);
-
-	if (!buf)
-		return (s32)size;
-
-	else if (size % sizeof(SharedContent) != 0) {
-		free(buf);
-		return -996;
-	}
-
-	*out = buf;
-	*count = size / sizeof(SharedContent);
-
-	return 0;
-}
-
-bool Title_SharedContentPresent(tmd_content* content, SharedContent shared[], u32 count)
-{
-	if (!shared || !content || !count)
-		return false;
-
-	if (!(content->type & 0x8000))
-		return false;
-
-	for (SharedContent* s_content = shared; s_content < shared + count; s_content++)
-	{
-		if (memcmp(s_content->hash, content->hash, sizeof(sha1)) == 0)
-			return true;
-	}
-
-	return false;
-}
-
-bool Title_GetcIOSInfo(int IOS, cIOSInfo* out)
-{
-	u64 titleID = 0x0000000100000000ULL | IOS;
+	u64 titleID = 0x100000000ULL | ios;
 	tmd_view* view = NULL;
 	u32 view_size = 0;
+	int i;
+
 	char path[ISFS_MAXPATH];
-	u32 size;
+	u32 size = 0;
+
 	cIOSInfo* buf = NULL;
 
 	s32 ret = Title_GetTMDView(titleID, &view, &view_size);
@@ -402,7 +352,7 @@ bool Title_GetcIOSInfo(int IOS, cIOSInfo* out)
 		return ret;
 
 	u32 content0 = 0;
-	for (int i = 0; i < view->num_contents; i++)
+	for (i = 0; i < view->num_contents; i++)
 	{
 		if (view->contents[i].index == 0) {
 			content0 = view->contents[i].cid;
@@ -411,19 +361,20 @@ bool Title_GetcIOSInfo(int IOS, cIOSInfo* out)
 	}
 	free(view);
 
-	sprintf(path, "/title/00000001/%08x/content/%08x.app", IOS, content0);
+	// insert ES_OpenTitleContent here
+	sprintf(path, "/title/00000001/%08x/content/%08x.app", ios, content0);
 	buf = (cIOSInfo*)NANDLoadFile(path, &size);
 
-	if (!buf || size != 0x40 || buf->hdr_magic != CIOS_INFO_MAGIC || buf->hdr_version != CIOS_INFO_VERSION)
-		goto fail;
+	if (buf && size == 0x40 && buf->hdr_magic == CIOS_INFO_MAGIC && buf->hdr_version == CIOS_INFO_VERSION) {
+		*out = *buf;
+		ret = 0;
+	}
+	else {
+		ret = -1;
+	}
 
-	*out = *buf;
 	free(buf);
-	return true;
-
-fail:
-	free(buf);
-	return false;
+	return ret;
 }
 
 #if 0
@@ -461,8 +412,7 @@ void Title_GetFreeSpace(u32* free, s32* user_free)
                 *user_free = user_clusters_free * cluster_size;
 }
 #endif
-__attribute__((aligned(0x10)))
-aeskey WiiCommonKey, vWiiCommonKey;
+u32 vWiiCommonKey[4] ATTRIBUTE_ALIGN(0x20);
 
 void Title_SetupCommonKeys(void)
 {
@@ -470,16 +420,17 @@ void Title_SetupCommonKeys(void)
 	if (keys_ok)
 		return;
 
-	// Grab the Wii common key...
-	otp_read(WiiCommonKey, offsetof(otp_t, common_key), sizeof(aeskey));
+	ATTRIBUTE_ALIGN(0x20)
+	static const u32 vWiiCommonKey_enc[4] = { 0x6E18DB23, 0x847CBA6C, 0x1931A417, 0x9BAF8E09 };
+	u32 iv[4] = {};
 
-	// ...and decrypt the vWii common key with it.
-	static const unsigned char vwii_key_enc_bin[0x10] = { 0x6e, 0x18, 0xdb, 0x23, 0x84, 0x7c, 0xba, 0x6c, 0x19, 0x31, 0xa4, 0x17, 0x9b, 0xaf, 0x8e, 0x09 };
-	unsigned char iv[0x10] = {};
+	s32 ret = ES_Decrypt(ES_KEY_COMMON, iv, vWiiCommonKey_enc, sizeof(vWiiCommonKey_enc), vWiiCommonKey);
 
-	memcpy(vWiiCommonKey, vwii_key_enc_bin, sizeof(vwii_key_enc_bin));
-	AES_Decrypt(WiiCommonKey, sizeof(aeskey), iv, sizeof(iv), vWiiCommonKey, vWiiCommonKey, sizeof(aeskey));
+	if (ret != 0) {
+		printf("ES_Encrypt -> %i\n", ret);
+		sleep(10);
+	}
 
-	keys_ok = true;
+	keys_ok = (ret == 0);
 	return;
 };

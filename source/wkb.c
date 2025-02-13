@@ -86,6 +86,8 @@ static void WKBEventHandler(USBKeyboard_event evt)
 
 static void* WKBThread(__attribute__((unused)) void* arg)
 {
+    sleep(10); // HACK: IOS totally bricks up if I initialize this too early(??)
+
     while (WKBThreadActive)
     {
         /*

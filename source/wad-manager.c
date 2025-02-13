@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 #include <string.h>
 #include <malloc.h>
 #include <ctype.h>
@@ -23,19 +24,17 @@
 #include "iospatch.h"
 #include "fileops.h"
 
-// Globals
-CONFIG gConfig;
-
 // Prototypes
-extern void __exception_setreload(int t);
-extern u32 WaitButtons (void);
+extern void __exception_setreload(unsigned sec);
+
 void CheckPassword (void);
 void SetDefaultConfig (void);
 int ReadConfigFile (void);
 int GetIntParam (char *inputStr);
 int GetStartupPath (char *startupPath, char *inputStr);
 int GetStringParam (char *outParam, char *inputStr, int maxChars);
-int LaunchApp(const char* path, bool external);
+
+wm_config_t gConfig;
 
 // Default password Up-Down-Left-Right-Up-Down
 //#define PASSWORD "UDLRUD"
@@ -151,37 +150,26 @@ void Disclaimer(void)
 
 int main(int argc, char **argv)
 {
-	__exception_setreload(10);
+	__exception_setreload(15);
+	Sys_LoadIOS(IOS_GetVersion());
 
-	ES_GetBoot2Version(&boot2version);
-	if (!AHBPROT_DISABLED)
-/*
-	We should just enable it tbh.
-	Like, look at https://github.com/WiiLink24/wfc-patcher-wii/blob/main/launcher/source/IOS.cpp
-	Awesome stuff.
- */
-	{
-		if (boot2version < 5)
-		{
-			if (!loadIOS(202)) if (!loadIOS(222)) if (!loadIOS(223)) if (!loadIOS(224)) if (!loadIOS(249)) loadIOS(36);
-		} else {
-			if (!loadIOS(249)) loadIOS(36);
-		}
+	/* Initialize display */
+	Video_Init();
+
+	/* Initialize console */
+	Gui_InitConsole(NULL); // todo: custom background & console config ?
+
+	printf("hello\n");
+
+	s32 ret = IOSPATCH_Apply();
+	if (ret != 0) {
+		printf("We goofed up.... (%#X)\n", ret);
+		sleep(15);
+		return ret;
 	}
 
 	/* Initialize subsystems */
 	Sys_Init();
-
-	/* Set video mode */
-	Video_SetMode();
-
-	FatMount();
-
-	/* Initialize console */
-	Gui_InitConsole();
-
-	/* Draw background */
-	Gui_DrawBackground();
 
 	/* Initialize Wiimote and GC Controller */
 	Wpad_Init();
@@ -190,7 +178,8 @@ int main(int argc, char **argv)
 	WKB_Initialize();
 	WIILIGHT_Init();
 
-	AES_Init();
+	FatMount();
+
 	Title_SetupCommonKeys();
 
 	/* Print disclaimer */
@@ -219,96 +208,144 @@ int main(int argc, char **argv)
 int ReadConfigFile()
 {
 	FILE* fptr;
-	char tmpStr[MAX_FILE_PATH_LEN];
-	char tmpOutStr[40], path[128];
-	s32 i;
-	bool found = false;
+	char tmpStr[256];
+	char path[128];
 
-	for (i = 0; i < FatGetDeviceCount(); i++)
+	if (__system_argv->argvMagic == ARGV_MAGIC) {
+		strncpy(path, __system_argv->argv[0], sizeof(path));
+		char *fpath = strrchr(path, '/');
+		if (fpath)
+		{
+			strcpy(fpath, "/config.txt");
+			if (FSOPFileExists(path))
+				goto found_the_file;
+		}
+	}
+
+	for (int i = 0; i < FatGetDeviceCount(); i++)
 	{	
 		snprintf(path, sizeof(path), "%s:%s", FatGetDevicePrefix(i), WM_CONFIG_FILE_PATH);
 		if (FSOPFileExists(path))
-		{
-			found = true;
-			break;
-		}
+			goto found_the_file;
 	}
 	
-	if (!found)
-		return -1;
+	return -1;
 
+found_the_file:
 	// Read the file
 	// fptr = fopen(path, "rb"); // umm, why are we opening with mode rb and then using fgets?
 	fptr = fopen(path, "r");
 	if (!fptr) {
-		// perror(path);
+		perror(path);
 		return -1;
 	}
 
 	// Read the options
 	while (true)
 	{
-		if (!fgets(tmpStr, MAX_FILE_PATH_LEN, fptr))
+		char *option, *value;
+		unsigned valueLen;
+
+		if (!fgets(tmpStr, sizeof(tmpStr), fptr))
 			break;
 
-		else if (isalpha((int)tmpStr[0]))
+		option = tmpStr;
+		while (isspace((int)*option))
+			option++;
+
+		if (*option == ';' || *option == '#' || *option == '\0')
+			continue;
+
+		value = strchr(tmpStr, '=');
+		if (!value)
+			continue;
+
+		while (isspace((int)*++value))
+			;
+
+		if (!*value)
+			continue;
+
+		valueLen = (strpbrk(value, "#;\r\n") ?: strchr(value, 0)) - value;
+		while (isspace((int)value[valueLen]))
+			valueLen--;
+
+		// Get the password
+		if (strncasecmp(option, "password", 8) == 0)
 		{
-			// Get the password
-			if (strncmp (tmpStr, "Password", 8) == 0)
-			{
-				// Get password
-				// GetPassword (gConfig.password, tmpStr);
-				GetStringParam (gConfig.password, tmpStr, MAX_PASSWORD_LENGTH);
+			int i;
 
-				// If password is too long, ignore it
-				if (strlen (gConfig.password) > 10)
-				{
-					gConfig.password [0] = 0;
-					puts("Password longer than 10 characters; will be ignored. Press a button...");
-					WaitButtons ();
-				}
-			}
-				
-			// Get startup path
-			else if (strncmp (tmpStr, "StartupPath", 11) == 0)
+			// Validate the length
+			if (valueLen >= MAX_PASSWORD_LENGTH)
 			{
-				// Get startup Path
-				GetStartupPath (gConfig.startupPath, tmpStr);
+				WaitPrompt("Password is too long....\n");
+				continue;
 			}
 
-			// cIOS
-			else if (strncmp (tmpStr, "cIOSVersion", 11) == 0)
-			{
-				// Get cIOSVersion
-				gConfig.cIOSVersion = GetIntParam(tmpStr);
+			// Validate the characters
+			const char* const validPasswordChars = "UDLR12";
+			for (i = 0; i < valueLen; i++) {
+				if (!strchr(validPasswordChars, value[i]))
+					break;
 			}
 
-			// FatDevice
-			else if (strncmp (tmpStr, "FatDevice", 9) == 0)
+			if (i != valueLen)
 			{
-				// Get fatDevice
-				GetStringParam (tmpOutStr, tmpStr, MAX_FAT_DEVICE_LENGTH);
-				for (i = 0; i < 5; i++)
-				{
-					if (strncmp(FatGetDevicePrefix(i), tmpOutStr, 4) == 0)
-					{
-						gConfig.fatDeviceIndex = i;
-					}
-				}
+				printf("Password has invalid characters! (?)\n");
+				printf("	Valid characters:  %s\n", validPasswordChars);
+				printf("	Provided password: %s\n", value);
+				printf("	                   %.*s^\n\n", i, "");
+
+				WaitPrompt(NULL);
+				continue;
 			}
-					
-			// NandDevice
-			else if (strncmp (tmpStr, "NANDDevice", 10) == 0)
+
+			strncpy(gConfig.password, value, i);
+		}
+
+		// Get startup path
+		else if (strncasecmp(option, "startupPath", 11) == 0)
+		{
+			value[valueLen] = '\0';
+
+			if (FSOPFolderExists(value))
+				strncpy(gConfig.startupPath, value, sizeof(gConfig.startupPath));
+		}
+
+		// cIOS
+		else if (strncasecmp(option, "cIOSVersion", 11) == 0)
+		{
+			char *endPtr;
+			long num = strtol(value, &endPtr, 10);
+
+			if (num < 3 || num >= 256)
 			{
-				// Get fatDevice
-				GetStringParam (tmpOutStr, tmpStr, MAX_NAND_DEVICE_LENGTH);
-				for (i = 0; i < 3; i++)
-				{
-					if (strncmp (ndevList[i].name, tmpOutStr, 2) == 0)
-					{
-						gConfig.nandDeviceIndex = i;
-					}
-				}
+				printf("Invalid cIOSVersion %lu (%s)\n", num, value);
+				WaitPrompt(NULL);
+			}
+
+			// Get cIOSVersion
+			gConfig.cIOSVersion = num;
+		}
+
+		// FatDevice
+		else if (strncasecmp(option, "fatDevice", 9) == 0)
+		{
+			// Get fatDevice
+			for (int i = 0; i < FatGetDeviceCount(); i++)
+			{
+				if (strcmp(FatGetDevicePrefix(i), value) == 0)
+					gConfig.fatDeviceIndex = i;
+			}
+		}
+
+		// NandDevice
+		else if (strncasecmp(tmpStr, "NANDDevice", 10) == 0)
+		{
+			for (int i = 0; i < 3; i++)
+			{
+				if (strcmp(ndevList[i].name, value) == 0)
+					gConfig.nandDeviceIndex = i;
 			}
 		}
 	} // EndWhile
@@ -322,107 +359,13 @@ int ReadConfigFile()
 
 void SetDefaultConfig (void)
 {
-	// Default password is NULL or no password
-	gConfig.password [0] = 0;
+	memset(&gConfig, 0, sizeof(gConfig));
 	
 	// Default startup folder
-	strcpy (gConfig.startupPath, WAD_ROOT_DIRECTORY);
+	strcpy (gConfig.startupPath, DEFAULT_WAD_DIRECTORY);
 	
 	gConfig.cIOSVersion = CIOS_VERSION_INVALID;            // Means that user has to select later
 	gConfig.fatDeviceIndex = FAT_DEVICE_INDEX_INVALID;     // Means that user has to select
 	gConfig.nandDeviceIndex = NAND_DEVICE_INDEX_INVALID;   // Means that user has to select
 
 } // SetDefaultConfig
-
-
-int GetStartupPath (char *startupPath, char *inputStr)
-{
-	int i = 0;
-	int len = strlen (inputStr);
-	
-	// Find the "="
-	while ((inputStr [i] != '=') && (i < len))
-	{
-		i++;
-	}
-	i++;
-
-	// Get to the "/"
-	while ((inputStr [i] != '/') && (i < len))
-	{
-		i++;
-	}
-
-	// Get the startup Path
-	int count = 0;
-	while (isascii(inputStr [i]) && (i < len) && (inputStr [i] != '\n') && 
-	         (inputStr [i] != '\r') && (inputStr [i] != ' '))
-	{
-		startupPath [count++] = inputStr [i++];
-	}
-	startupPath [count] = 0; // NULL terminate
-
-	return (0);
-} // GetStartupPath
-
-int GetIntParam (char *inputStr)
-{
-	int retval = 0;
-	int i = 0;
-	int len = strlen (inputStr);
-	char outParam [40];
-	
-	// Find the "="
-	while ((inputStr [i] != '=') && (i < len))
-	{
-		i++;
-	}
-	i++;
-	
-	// Get to the first alpha numeric character
-	while ((isdigit((int)inputStr[i]) == 0) && (i < len))
-	{
-		i++;
-	}
-
-	// Get the string param
-	int outCount = 0;
-	while ((isdigit((int)inputStr[i])) && (i < len) && (outCount < 40))
-	{
-		outParam [outCount++] = inputStr [i++];
-	}
-	outParam [outCount] = 0; // NULL terminate
-	retval = atoi (outParam);
-	
-	return (retval);
-} // GetIntParam
-
-
-int GetStringParam (char *outParam, char *inputStr, int maxChars)
-{
-	int i = 0;
-	int len = strlen (inputStr);
-	
-	// Find the "="
-	while ((inputStr [i] != '=') && (i < len))
-	{
-		i++;
-	}
-	i++;
-	
-	// Get to the first alpha character
-	while ((isalpha((int)inputStr[i]) == 0) && (i < len))
-	{
-		i++;
-	}
-	
-	// Get the string param
-	int outCount = 0;
-	while ((isalnum((int)inputStr[i])) && (i < len) && (outCount < maxChars))
-	{
-		outParam [outCount++] = inputStr [i++];
-	}
-	outParam [outCount] = 0; // NULL terminate
-	
-	return (0);
-} // GetStringParam

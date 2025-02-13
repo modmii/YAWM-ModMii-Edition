@@ -13,20 +13,12 @@
 #ifndef _IOSPATCH_H
 #define _IOSPATCH_H
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-/* __cplusplus */
-
 #include <gccore.h>
+#include <ogc/machine/processor.h>
 
-#define AHBPROT_DISABLED ((*(vu32*)0xcd800064 == 0xFFFFFFFF) ? 1 : 0)
+#define AHBPROT_DISABLED (read32(0xcd800064) != 0)
 
-u32 IOSPATCH_AHBPROT();
-u32 IOSPATCH_Apply();
-
-#ifdef __cplusplus
-}
-#endif /* __cplusplus */
+int  IOSPATCH_Apply();
+void IOSPATCH_SetSignatureChecks(bool);
 
 #endif /* _IOSPATCH_H */

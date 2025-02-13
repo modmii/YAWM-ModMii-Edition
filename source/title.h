@@ -3,16 +3,6 @@
 
 #include <ogc/es.h>
 
-/* Constants */
-#define BLOCK_SIZE	0x4000
-
-/* /shared1/content.map entry */
-typedef struct
-{
-	char filename[8];
-	sha1 hash;
-} ATTRIBUTE_PACKED SharedContent;
-
 /* "cIOS build tag" */
 enum
 {
@@ -35,7 +25,7 @@ typedef struct
 _Static_assert(sizeof(cIOSInfo) == 0x40, "cIOSInfo struct size wrong");
 
 /* Variables */
-extern aeskey WiiCommonKey, vWiiCommonKey;
+extern u32 vWiiCommonKey[4];
 
 /* Prototypes */
 s32 Title_ZeroSignature(signed_blob *);
@@ -45,13 +35,12 @@ s32 Title_GetList(u64 **, u32 *);
 s32 Title_GetTicketViews(u64, tikview **, u32 *);
 s32 Title_GetTMDView(u64, tmd_view **, u32 *);
 s32 Title_GetTMD(u64, signed_blob **, u32 *);
+s32 Title_GetTMDContents(signed_blob *, u32**, u32*);
 s32 Title_GetVersion(u64, u16 *);
 s32 Title_GetSysVersion(u64, u64 *);
 s32 Title_GetSize(u64, u32 *);
-s32 Title_GetIOSVersions(u8 **, u32 *);
-s32 Title_GetSharedContents(SharedContent** out, u32* count);
-bool Title_SharedContentPresent(tmd_content* content, SharedContent shared[], u32 count);
-bool Title_GetcIOSInfo(int IOS, cIOSInfo*);
+s32 Title_GetIOSVersions(u8 *, u32 *);
+s32 Title_GetcIOSInfo(int IOS, cIOSInfo*);
 
 void Title_SetupCommonKeys(void);
 
