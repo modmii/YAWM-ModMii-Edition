@@ -900,7 +900,7 @@ s32 Wad_Install(FILE *fp)
 skipChecks:
 			if (tmd_data->title_version < 416)
 			{
-				if(boot2version == 4)
+				if(boot2version > 4)
 				{
 					printf("\n    This version of the System Menu\n    is not compatible with your Wii\n");
 					ret = -999;
